@@ -1,17 +1,17 @@
 # TradingChat · AI 전략 워크스페이스
 
-Vercel 웹 + Supabase Auth/Postgres + PC 계좌 조회 실행기입니다. 차트 없이 전략 채팅·운용안 승인·계좌 상태·매매 일지·전략 버전별 실적을 관리합니다.
+Vercel 웹 + 사이트 비밀번호 + Supabase Postgres + PC 계좌 조회 실행기입니다. 차트 없이 전략 채팅·운용안 승인·계좌 상태·매매 일지·전략 버전별 실적을 관리합니다.
 
 ## 현재 구현 범위
 
-- 기존 브라우저 데모 유지. Supabase 로그인 후에는 별도의 서버 저장 워크스페이스 사용
-- 개인 계정 이메일 허용 목록, Supabase 비밀번호 로그인, HttpOnly/SameSite/Secure 세션 쿠키
+- 기존 브라우저 데모 유지. 사이트 비밀번호 입력 후에는 별도의 서버 저장 워크스페이스 사용
+- 이메일/회원가입 없는 사이트 비밀번호 입장, 대시보드·정적 자산·API 접근 차단, 서명된 HttpOnly/SameSite/Secure 세션 쿠키
 - OpenAI Responses / Gemini GenerateContent 서버 호출, 구조화된 전략 제안, 호출 한도·사용량 저장
 - 전략별 채팅, 변경할 때마다 고정된 새 버전, SHA-256 해시와 사용자 승인·거절·철회·만료
 - 서버에서 승인 검증 후 고정 시나리오 모의 실행. 생성된 거래에 승인 전략 버전 연결
 - 매매 일지 메모·태그 수정, CSV 다운로드
 - 버전별 거래 수·승률·순손익·수수료·펀딩 수입·profit factor 집계
-- 데모/테스트넷/실거래 데이터 분리, 사용자별 RLS, 계정 간 참조 차단
+- 데모/테스트넷/실거래 데이터 분리, 직접 DB 접근을 차단하는 RLS, 고정 개인 소유자와 복합 외래키
 - PC의 OS 보안 저장소에 Binance 키 보관 → 서명된 GET 계좌 조회 → 요약만 서버 전송
 - 실행기 토큰 해시 저장, 24시간 만료, 재발급/폐기, 스냅샷 중복 UUID 차단
 
@@ -22,15 +22,17 @@ Vercel 웹 + Supabase Auth/Postgres + PC 계좌 조회 실행기입니다. 차�
 ## 1. Supabase 준비
 
 1. Supabase 프로젝트를 만듭니다. Postgres 15 이상이 필요합니다.
-2. SQL Editor에서 [`supabase/migrations/202610160001_trading_workspace.sql`](supabase/migrations/202610160001_trading_workspace.sql)을 **한 번** 실행합니다. 기존 테이블을 삭제하지 않는 초기 마이그레이션입니다.
-3. Authentication → Users에서 개인 계정을 만들고 이메일을 인증합니다. 신규 가입 허용은 끕니다. 이 앱은 공개 회원가입 화면을 제공하지 않습니다.
-4. 해당 이메일을 Vercel `OWNER_EMAIL`로 지정합니다.
-5. 프로젝트 URL 및 서버용 키를 아래 환경변수에 입력합니다. 키를 GitHub에 커밋하거나 채팅에 보내지 않습니다.
+2. SQL Editor에서 `supabase/migrations/202610160001_trading_workspace.sql`을 한 번 실행합니다.
+3. 이어서 `supabase/migrations/202610160002_password_gate.sql`을 한 번 실행합니다. 첫 번째 SQL을 이미 실행했다면 두 번째 SQL만 추가합니다.
+4. Supabase Auth 계정 생성·회원가입·이메일 인증은 필요 없습니다. 두 번째 마이그레이션이 독립된 개인 데이터 소유자를 생성하고 기존 소유자가 하나면 해당 데이터를 그대로 유지합니다. 기존 데이터 소유자가 둘 이상이면 임의로 계정을 합치지 않고 마이그레이션을 중단합니다.
+5. 아래 Vercel 환경변수에 실제 값을 직접 입력하고 Redeploy합니다. 비밀번호/키는 코드나 채팅에 붙여넣지 않습니다.
 
 ### 데이터 구조
 
 | 테이블 | 역할 |
 | --- | --- |
+| `workspace_owners`, `workspace_config` | Supabase Auth와 독립적인 개인 데이터 소유자 |
+| `password_attempts` | 익명화한 접속 시도와 서버 간 공유 입력 제한 |
 | `strategies` | 독립된 전략 이름과 소유자 |
 | `strategy_versions` | 변경 불가 운용안, 버전, 모델, 해시, 모드 |
 | `messages` | 전략·모드별 사용자/AI 대화와 제안 버전 연결 |
@@ -43,7 +45,7 @@ Vercel 웹 + Supabase Auth/Postgres + PC 계좌 조회 실행기입니다. 차�
 | `ai_calls`, `ai_usage` | 호출 한도 예약 및 모델별 토큰 사용 정보 |
 | `strategy_performance` 뷰 | 모든 저장 거래의 버전/모드별 실적 |
 
-일반 사용자 JWT에는 자기 데이터 SELECT만 허용합니다. 수정 RPC는 `anon`/`authenticated`에 공개하지 않습니다. Vercel 서버가 인증 사용자를 확인하고 소유자를 강제해 호출합니다. 복합 외래키로 다른 사용자의 전략·승인·거래 참조를 차단합니다. 전략 버전과 완료 거래는 변경 불가이며, 일지는 실적과 별도로 수정합니다.
+두 번째 마이그레이션 이후 `anon`과 `authenticated`에는 앱 테이블·실적 뷰·RPC 접근 권한을 부여하지 않습니다. 기존 Supabase 로그인 토큰으로도 직접 조회할 수 없습니다. Vercel 서버가 자체 서명 세션을 검증한 후 고정 워크스페이스 소유자로만 DB를 조회합니다. 복합 외래키로 다른 소유자의 전략·승인·거래 참조를 차단합니다. 전략 버전과 완료 거래는 변경 불가이며, 일지는 실적과 별도로 수정합니다.
 
 실적의 순손익은 `실현 손익 − 수수료 + 펀딩 수입`입니다. 음수 펀딩은 비용입니다. 승률은 순손익 양수인 완료 거래 비율이며, 0은 승리에 포함하지 않습니다. PF는 양수 순손익 합 / 음수 순손익 절대 합입니다. 손실 표본이 없으면 `—`로 표시합니다. 현재 화면·CSV에는 최신 거래 500건을 표시하며 실적 뷰는 전체 DB를 집계합니다.
 
@@ -55,9 +57,9 @@ Vercel 웹 + Supabase Auth/Postgres + PC 계좌 조회 실행기입니다. 차�
 | --- | --- |
 | `APP_ORIGIN` | 정확한 HTTPS 배포 주소. 경로·끝 `/` 없이 `https://your-app.vercel.app` |
 | `SUPABASE_URL` | `https://PROJECT.supabase.co` |
-| `SUPABASE_ANON_KEY` | Supabase legacy `anon` JWT 키 |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase legacy `service_role` JWT 키. 서버 전용, RLS 우회 권한이 있으므로 노출 금지 |
-| `OWNER_EMAIL` | 이메일 인증을 마친 개인 Supabase 계정 |
+| `APP_PASSWORD` | 소유자가 지정한 사이트 비밀번호. 10자 이상, 서버 전용 비밀값 |
+| `APP_SESSION_SECRET` | 임의로 생성한 세션 서명 비밀값. 아래 명령으로 32바이트 생성 |
 | `OPENAI_API_KEY` | OpenAI API 키. 서버 전용 |
 | `OPENAI_CHAT_MODEL` | 계정에서 사용 가능한 정확한 채팅 모델 ID |
 | `GEMINI_API_KEY` | Gemini API 키. 서버 전용 |
@@ -70,7 +72,17 @@ Vercel 웹 + Supabase Auth/Postgres + PC 계좌 조회 실행기입니다. 차�
 
 AI 호출은 입력 최대 4,000자, 최근 대화 최대 12개 + 최근 운용안, 출력 최대 4,000토큰으로 제한합니다. 실패한 요청도 호출 한도를 소비합니다. 이는 달러 금액 한도가 아니므로 공급사 결제 예산도 별도 설정하세요.
 
-로그인 실패 제한은 Supabase Auth의 rate limits를 사용합니다. 개인 배포이므로 Supabase 공개 가입을 끄고, Vercel 환경변수를 신뢰할 수 없는 Preview 배포에 노출하지 마세요. 이 릴리스는 MFA 로그인 UI를 지원하지 않습니다.
+접속은 `/login.html`에서 비밀번호 하나만 입력합니다. Supabase Auth API를 호출하지 않습니다. 로그인 전에는 Vercel routing middleware가 대시보드·자바스크립트·스타일·데이터 API를 차단하고, 각 데이터 API도 서명 세션을 다시 검증합니다. 실행기 API는 별도의 만료 가능한 Bearer 토큰으로만 접근합니다.
+
+`APP_SESSION_SECRET` 생성:
+
+```sh
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+세션은 8시간 뒤 만료됩니다. 로그아웃하면 브라우저 쿠키를 제거하고 입장 화면으로 이동합니다. 비밀번호나 세션 비밀값을 바꾸고 재배포하면 기존 서명 세션이 모두 무효가 됩니다. 비밀번호는 공개 저장소·브라우저 저장소·로그에 넣지 않고 Vercel 비밀 환경변수로만 보관합니다. 서버에서 일정 길이의 해시를 상수시간 비교합니다.
+
+입력 시도는 Supabase에서 집계하여 IP별 최근 15분 10회, 전체 최근 15분 100회로 제한합니다. IP는 HMAC 처리한 값만 저장하고 24시간 지난 시도는 정리합니다. 성공한 입력도 시도 수에 포함됩니다. 신뢰할 수 없는 Preview 배포에 실제 환경변수를 노출하지 마세요.
 
 ## 3. 배포와 사용
 
@@ -83,7 +95,7 @@ Vercel에서 이 GitHub 저장소를 Import:
 
 `vercel.json`은 CSP 등 보안 헤더와 채팅 API 60초 실행 설정을 포함합니다. 브라우저는 같은 출처의 `/api/*`만 호출하며 공급사나 Supabase로 직접 연결하지 않습니다. API 파일은 Vercel이 배포합니다. `dist`만 다른 정적 호스팅에 올리면 서버 기능은 작동하지 않습니다.
 
-1. 연결 설정 → 개인 계정 로그인
+1. 사이트 접속 → 비밀번호 입력 → 대시보드 (이메일/회원가입 없음)
 2. 전략 관리 → 새 전략 → AI와 대화 → 버전 카드 수치 확인 → 승인
 3. 데모 모드 → 모의 실행 → 다음 모의 단계 3회 → 거래 기록 확인
 4. 거래 기록 → 일지 작성, 전략별 실적 → 버전별 비교
@@ -98,13 +110,13 @@ npm ci
 npm test
 # 별도로 로컬 .env를 작성한 경우:
 node --env-file=.env scripts/dev.mjs
-# 설정 없이 브라우저 데모만:
+# 로컬에서도 비밀번호 입장 규칙은 동일합니다.
 npm run dev
 ```
 
 로컬 `.env`의 `APP_ORIGIN`은 `http://localhost:3000`이어야 합니다. 로컬 서버는 `127.0.0.1`에서만 수신합니다.
 
-자동 검증은 PGlite의 실제 Postgres 엔진에서 마이그레이션·RLS·권한·승인·일일 한도·모의 거래·버전별 집계를 실행하고, API 모킹과 jsdom으로 CSRF·출력 검증·UI 전환을 검사합니다. 실제 Supabase, 모델 API, Binance 계정 연결은 별도 키 설정 후 확인해야 합니다. 실제 브라우저 시각 검증과 테스트넷 주문 통합 검증은 아직 수행하지 않았습니다.
+자동 검증은 PGlite의 실제 Postgres 엔진에서 마이그레이션·RLS·권한·승인·일일 한도·모의 거래·버전별 집계를 실행하고, API 모킹과 jsdom으로 CSRF·출력 검증·UI 전환을 검사합니다. 실제 Vercel middleware 배포, Supabase, 모델 API, Binance 계정 연결은 환경변수 설정 후 확인해야 합니다. 실제 브라우저 시각 검증과 테스트넷 주문 통합 검증은 아직 수행하지 않았습니다.
 
 ## 다음 실거래 단계
 

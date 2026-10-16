@@ -60,3 +60,22 @@ test('runner snapshots are atomic, rate limited, and rejected after revocation',
  await db.query('update runner_connections set revoked_at=now() where id=$1',[r.id]);
  await assert.rejects(()=>db.query('select save_account_snapshot($1,$2,$3,$4,$5,$6,$7)',[r.id,owner,first,'testnet',100,0,[]]),/Runner expired/);
 });
+test('password migration preserves existing owner/data while removing Supabase Auth access',async()=>{
+ await db.exec(await readFile(new URL('../supabase/migrations/202610160002_password_gate.sql',import.meta.url),'utf8'));
+ assert.equal((await one('select owner_id from workspace_config')).owner_id,owner);
+ assert.equal((await one('select count(*) as n from trades')).n,2);
+ const refs=(await db.query("select confrelid::regclass::text as target from pg_constraint where contype='f' and connamespace='public'::regnamespace")).rows;
+ assert.ok(!refs.some(r=>r.target==='auth.users'));
+ await db.exec(`set role authenticated;select set_config('request.jwt.claim.sub','${owner}',false);`);
+ try{await assert.rejects(()=>db.query('select * from trades'),/permission denied/);await assert.rejects(()=>db.query('select * from strategy_performance'),/permission denied/);}finally{await db.exec('reset role');}
+ for(let i=0;i<10;i++)await db.query('select reserve_password_attempt($1)',['c'.repeat(64)]);
+ await assert.rejects(()=>db.query('select reserve_password_attempt($1)',['c'.repeat(64)]),/Password attempt limit/);
+});
+test('fresh database provisions a private owner without any Supabase Auth user',async()=>{
+ const fresh=new PGlite();try{
+  await fresh.exec("create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;");
+  for(const name of ['202610160001_trading_workspace.sql','202610160002_password_gate.sql'])await fresh.exec(await readFile(new URL('../supabase/migrations/'+name,import.meta.url),'utf8'));
+  assert.equal((await fresh.query('select count(*) as n from auth.users')).rows[0].n,0);
+  assert.equal((await fresh.query('select count(*) as n from workspace_config')).rows[0].n,1);
+ }finally{await fresh.close()}
+});

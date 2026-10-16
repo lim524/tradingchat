@@ -1,4 +1,5 @@
 import http from 'node:http';
+import middleware from '../middleware.js';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -8,6 +9,9 @@ const routes=Object.fromEntries(await Promise.all(['auth','workspace','chat','ru
 http.createServer(async(req,res)=>{
  try {
   const pathname=new URL(req.url,'http://localhost').pathname;
+  const gate=await middleware(new Request(new URL(req.url,'http://localhost:3000'),{method:req.method,headers:req.headers}));
+  if(gate.headers.get('x-middleware-next')!=='1'){res.writeHead(gate.status,Object.fromEntries(gate.headers));res.end(Buffer.from(await gate.arrayBuffer()));return;}
+  res.setHeader('Cache-Control','no-store');
   const endpoint=pathname.match(/^\/api\/(auth|workspace|chat|runner)$/)?.[1];
   if(endpoint){let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>24000){res.writeHead(413);res.end();return;}}req.body=raw||undefined;await routes[endpoint](req,res);return;}
   if(!['GET','HEAD'].includes(req.method)){res.writeHead(405);res.end();return;}

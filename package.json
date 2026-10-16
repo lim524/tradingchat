@@ -12,5 +12,8 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.10",
     "jsdom": "^27.4.0"
+  },
+  "dependencies": {
+    "@vercel/functions": "^3.10.1"
   }
 }
