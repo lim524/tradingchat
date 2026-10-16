@@ -74,8 +74,24 @@ test('password migration preserves existing owner/data while removing Supabase A
 test('fresh database provisions a private owner without any Supabase Auth user',async()=>{
  const fresh=new PGlite();try{
   await fresh.exec("create role anon;create role authenticated;create role service_role bypassrls;create schema auth;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;");
-  for(const name of ['202610160001_trading_workspace.sql','202610160002_password_gate.sql'])await fresh.exec(await readFile(new URL('../supabase/migrations/'+name,import.meta.url),'utf8'));
+  for(const name of ['202610160001_trading_workspace.sql','202610160002_password_gate.sql','202610160003_exchange_accounts.sql'])await fresh.exec(await readFile(new URL('../supabase/migrations/'+name,import.meta.url),'utf8'));
   assert.equal((await fresh.query('select count(*) as n from auth.users')).rows[0].n,0);
   assert.equal((await fresh.query('select count(*) as n from workspace_config')).rows[0].n,1);
  }finally{await fresh.close()}
+});
+test('exchange migration preserves Binance history and scopes tokens per account',async()=>{
+ await db.exec(await readFile(new URL('../supabase/migrations/202610160003_exchange_accounts.sql',import.meta.url),'utf8'));
+ const historical=await one('select s.account_id,a.exchange,a.mode from account_snapshots s join exchange_accounts a on a.id=s.account_id');assert.equal(historical.exchange,'binance');assert.equal(historical.mode,'testnet');
+ const binance=await one("select id from exchange_accounts where user_id=$1 and exchange='binance' and mode='live'",[owner]);
+ const bitget=await one("insert into exchange_accounts(user_id,exchange,account_type,mode,label) values($1,'bitget','uta','live','Bitget main') returning id",[owner]);
+ const br=await one("select * from pair_account_runner($1,$2,$3)",[owner,binance.id,'d'.repeat(64)]);
+ const bg=await one("select * from pair_account_runner($1,$2,$3)",[owner,bitget.id,'e'.repeat(64)]);
+ assert.equal((await one('select revoked_at from runner_connections where id=$1',[br.id])).revoked_at,null);
+ await db.query('select save_account_snapshot($1,$2,$3,$4,$5,$6,$7)',[br.id,owner,'66666666-6666-4666-8666-666666666666','live',100,1,[]]);
+ await db.query('select save_account_snapshot($1,$2,$3,$4,$5,$6,$7)',[bg.id,owner,'77777777-7777-4777-8777-777777777777','live',200,2,[]]);
+ const snapshots=(await db.query("select account_id,balance from account_snapshots where mode='live' order by balance")).rows;assert.equal(snapshots.length,2);assert.notEqual(snapshots[0].account_id,snapshots[1].account_id);
+ await assert.rejects(()=>db.query('select save_account_snapshot($1,$2,$3,$4,$5,$6,$7)',[bg.id,owner,'88888888-8888-4888-8888-888888888888','testnet',100,0,[]]),/Account mismatch/);
+ await db.query('select pair_account_runner($1,$2,$3)',[owner,bitget.id,'f'.repeat(64)]);
+ assert.equal((await one('select revoked_at from runner_connections where id=$1',[br.id])).revoked_at,null);assert.ok((await one('select revoked_at from runner_connections where id=$1',[bg.id])).revoked_at);
+ await assert.rejects(()=>db.query('select pair_account_runner($1,$2,$3)',[other,bitget.id,'g'.repeat(64)]),/Account not found/);
 });
